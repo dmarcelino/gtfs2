@@ -2,3 +2,4 @@ pytest
 freezegun
 requests
 voluptuous
+pygtfs==0.1.11.*

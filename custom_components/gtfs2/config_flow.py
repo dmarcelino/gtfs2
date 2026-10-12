@@ -13,6 +13,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     DEFAULT_PATH, 
+    DOCU_EXTRACTING,
     DOMAIN, 
     DEFAULT_API_KEY_LOCATION,
     DEFAULT_REFRESH_INTERVAL, 
@@ -72,7 +73,7 @@ from .gtfs_helper import (
 _LOGGER = logging.getLogger(__name__)
 
 TRANSLATION_DESCRIPTION_PLACEHOLDERS = {
-    "docu_extracting": "https://github.com/vingerha/gtfs2/wiki/01:-Initial-Setup-of-the-Static-GTFS-Data-Source#extraction-of-data-from-the-datasource",
+    "docu_extracting": DOCU_EXTRACTING,
     "docu_menu_options": "https://github.com/vingerha/gtfs2/wiki/00:-Installation-and-Main-Menu",
     "docu_select_source": "https://github.com/vingerha/gtfs2/wiki/01:-Initial-Setup-of-the-Static-GTFS-Data-Source",
     "docu_local_stops": "https://github.com/vingerha/gtfs2/wiki/03:-Adding-a-location%E2%80%90based-dynamic-departures-sensor",
@@ -553,7 +554,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             get_gtfs, self.hass, DEFAULT_PATH, data, False
         )
         _LOGGER.debug("Checkdata pygtfs: %s with data: %s", self._pygtfs, data)
-        if self._pygtfs in ['no_data_file', 'no_zip_file', 'extracting'] :
+        if self._pygtfs in ['no_data_file', 'no_zip_file', 'extracting', 'extraction_failed'] :
             return self._pygtfs
         check_index = await self.hass.async_add_executor_job(
                     check_datasource_index, self.hass, self._pygtfs, DEFAULT_PATH, data["file"]
@@ -574,6 +575,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return "no_data_file"
         if self._pygtfs == "extracting":
                 return "extracting"            
+        if self._pygtfs == "extraction_failed":
+            return "extraction_failed"
         self._data = {
             "schedule": self._pygtfs,
             "origin": data["origin"],

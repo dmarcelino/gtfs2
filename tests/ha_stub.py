@@ -261,6 +261,12 @@ class _UpdateFailed(Exception):
     pass
 
 
+class _IssueSeverity:
+    CRITICAL = "critical"
+    ERROR = "error"
+    WARNING = "warning"
+
+
 class _Platform:
     SENSOR = "sensor"
     BINARY_SENSOR = "binary_sensor"
@@ -355,6 +361,10 @@ def install() -> None:
             async_dispatcher_send=_Unreached("async_dispatcher_send"))
     _module("homeassistant.helpers.event",
             async_track_time_change=_Unreached("async_track_time_change"))
+    _module("homeassistant.helpers.issue_registry",
+            IssueSeverity=_IssueSeverity,
+            async_create_issue=_Unreached("issue_registry.async_create_issue"),
+            async_delete_issue=_Unreached("issue_registry.async_delete_issue"))
     _module("homeassistant.components")
     _module("homeassistant.components.sensor",
             PLATFORM_SCHEMA=_Unreached("PLATFORM_SCHEMA"))
