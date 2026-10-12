@@ -13,6 +13,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     DEFAULT_PATH, 
+    DOCU_EXTRACTING,
     DOMAIN, 
     DEFAULT_API_KEY_LOCATION,
     DEFAULT_REFRESH_INTERVAL, 
@@ -63,6 +64,7 @@ from .gtfs_helper import (
     get_datasources,
     remove_datasource,
     check_datasource_index,
+    GTFS_UNAVAILABLE,
     get_agency_list,
     get_local_stop_list,
     get_train_station_list,
@@ -72,7 +74,7 @@ from .gtfs_helper import (
 _LOGGER = logging.getLogger(__name__)
 
 TRANSLATION_DESCRIPTION_PLACEHOLDERS = {
-    "docu_extracting": "https://github.com/vingerha/gtfs2/wiki/01:-Initial-Setup-of-the-Static-GTFS-Data-Source#extraction-of-data-from-the-datasource",
+    "docu_extracting": DOCU_EXTRACTING,
     "docu_menu_options": "https://github.com/vingerha/gtfs2/wiki/00:-Installation-and-Main-Menu",
     "docu_select_source": "https://github.com/vingerha/gtfs2/wiki/01:-Initial-Setup-of-the-Static-GTFS-Data-Source",
     "docu_local_stops": "https://github.com/vingerha/gtfs2/wiki/03:-Adding-a-location%E2%80%90based-dynamic-departures-sensor",
@@ -229,11 +231,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors=errors,
             )
         try:
-            removed = remove_datasource(self.hass, DEFAULT_PATH, user_input[CONF_FILE], True)
+            removed = await self.hass.async_add_executor_job(
+                remove_datasource, self.hass, DEFAULT_PATH, user_input[CONF_FILE], True
+            )
             _LOGGER.debug(f"Removed gtfs data source: {removed}")
         except Exception as ex:
             _LOGGER.error("Error while deleting : %s", {ex})
             return "generic_failure"
+        if removed == "extracting":
+            return self.async_abort(reason="extracting", description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS)
         return self.async_abort(reason="files_deleted")
         
     async def async_step_agency(self, user_input: dict | None = None) -> FlowResult:
@@ -245,11 +251,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._pygtfs.engine.dispose()
             except Exception:
                 pass
-        self._pygtfs = get_gtfs(
-            self.hass,
-            DEFAULT_PATH,
-            self._user_inputs,
-            False,
+        self._pygtfs = await self.hass.async_add_executor_job(
+            get_gtfs, self.hass, DEFAULT_PATH, self._user_inputs, False
         )
         check_data = await self._check_data(self._user_inputs)
         if check_data :
@@ -309,7 +312,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         _LOGGER.debug("Source check data: %s", check_data)
         if check_data :
             errors["base"] = check_data
-            return self.async_abort(reason=check_data)
+            return self.async_abort(reason=check_data, description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS)
             
         if self._pygtfs and hasattr(self._pygtfs, 'session'):
             try:
@@ -317,11 +320,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._pygtfs.engine.dispose()
             except Exception:
                 pass            
-        self._pygtfs = get_gtfs(
-            self.hass,
-            DEFAULT_PATH,
-            self._user_inputs,
-            False,
+        self._pygtfs = await self.hass.async_add_executor_job(
+            get_gtfs, self.hass, DEFAULT_PATH, self._user_inputs, False
         )
         if user_input is None:
             route_list = [
@@ -443,7 +443,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if check_config == "stop_incorrect":
                 errors["base"] = "stop_incorrect"
             elif check_config:
-                return self.async_abort(reason=check_config)
+                return self.async_abort(reason=check_config, description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS)
             else:
                 return self.async_create_entry(title=data[CONF_NAME], data=data)
 
@@ -536,7 +536,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if check_config:
             _LOGGER.debug(f"CheckConfig: {check_config}")
             errors["base"] = check_config
-            return self.async_abort(reason=check_config)
+            return self.async_abort(reason=check_config, description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS)
         else:
             return self.async_create_entry(
                 title=self._user_inputs[CONF_NAME], data=self._user_inputs
@@ -553,10 +553,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             get_gtfs, self.hass, DEFAULT_PATH, data, False
         )
         _LOGGER.debug("Checkdata pygtfs: %s with data: %s", self._pygtfs, data)
-        if self._pygtfs in ['no_data_file', 'no_zip_file', 'extracting'] :
+        if self._pygtfs in GTFS_UNAVAILABLE:
             return self._pygtfs
         check_index = await self.hass.async_add_executor_job(
-                    check_datasource_index, self.hass, self._pygtfs, DEFAULT_PATH, data["file"]
+                    check_datasource_index, self._pygtfs
                 )   
         return None
         
@@ -570,10 +570,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._pygtfs = await self.hass.async_add_executor_job(
             get_gtfs, self.hass, DEFAULT_PATH, data, False
         )
-        if self._pygtfs == "no_data_file":
-            return "no_data_file"
-        if self._pygtfs == "extracting":
-                return "extracting"            
+        if self._pygtfs in GTFS_UNAVAILABLE:
+            return self._pygtfs
         self._data = {
             "schedule": self._pygtfs,
             "origin": data["origin"],
@@ -587,7 +585,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         # check and/or add indexes
         check_index = await self.hass.async_add_executor_job(
-                    check_datasource_index, self.hass, self._pygtfs, DEFAULT_PATH, data["file"]
+                    check_datasource_index, self._pygtfs
                 )
              
         try:

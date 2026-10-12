@@ -108,7 +108,8 @@
 	  "generic_failure": "Overall failure, check logs",
 	  "no_zip_file": "Data collection issue: ZIP file not existing in the correct folder, note that it is capital-sensitive",
 	  "stop_limit_reached": "Detected a high number of stops for this radius, \npossibly impacting system performance. \n You can change the limit at your own risk before changing the radius.",
-	  "extracting": "(Still) extracting data, this will take time [(docu)]({docu_extracting})"
+	  "extracting": "(Still) extracting data, this will take time [(docu)]({docu_extracting})",
+	  "extraction_failed": "Extracting the data of this datasource failed, see Settings > Repairs for the reason [(docu)]({docu_extracting})"
     }
   },
   "options": {
@@ -142,6 +143,12 @@
     },
 	"abort": {
 	  "stop_limit_reached": "Detected a high number of stops for this radius, \npossibly impacting system performance. \n You can change the limit at your own risk before changing the radius"
+    }
+  },
+  "issues": {
+    "extraction_failed": {
+      "title": "GTFS datasource {datasource} could not be extracted",
+      "description": "Extracting the static GTFS data of datasource '{datasource}' failed:\n\n{error}\n\nThe previous data of this datasource, if there is any, is still in use. GTFS2 retries a failed extraction once by itself, 15 minutes after it failed. If this message stays, fix the source and run the 'gtfs2.update_gtfs' action for this datasource, or remove the datasource and add it again."
     }
   },
   "selector": {
