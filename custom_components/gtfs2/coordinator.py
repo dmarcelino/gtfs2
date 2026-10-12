@@ -93,11 +93,13 @@ class GTFSUpdateCoordinator(DataUpdateCoordinator):
             "alert": {}
         }           
         
-        if check_extracting(self.hass, self.hass.config.path(self._data['gtfs_dir']), self._data['file']):   
+        if self._pygtfs == "extracting" or check_extracting(self.hass, self.hass.config.path(self._data['gtfs_dir']), self._data['file']):
             _LOGGER.debug("Cannot update this sensor as still unpacking: %s", self._data["file"])
             self._data.update(previous_data)
             self._data["extracting"] = True
             return self._data
+        if self._pygtfs in ("no_data_file", "no_zip_file", "extraction_failed"):
+            raise UpdateFailed(f"GTFS datasource {data['file']} unavailable: {self._pygtfs}")
         
 
         # determine static + rt or only static (refresh schedule depending)
@@ -249,11 +251,13 @@ class GTFSLocalStopUpdateCoordinator(DataUpdateCoordinator):
         }           
         self._data["gtfs_updated_at"] = dt_util.utcnow().isoformat() 
         
-        if check_extracting(self.hass, self.hass.config.path(self._data['gtfs_dir']), self._data['file']):   
+        if self._pygtfs == "extracting" or check_extracting(self.hass, self.hass.config.path(self._data['gtfs_dir']), self._data['file']):
             _LOGGER.debug("Cannot update this sensor as still unpacking: %s", self._data["file"])
             self._data.update(previous_data)
             self._data["extracting"] = True
             return self._data
+        if self._pygtfs in ("no_data_file", "no_zip_file", "extraction_failed"):
+            raise UpdateFailed(f"GTFS datasource {data['file']} unavailable: {self._pygtfs}")
 
         check_index = await self.hass.async_add_executor_job(
                 check_datasource_index, self.hass, self._pygtfs, self.hass.config.path(DEFAULT_PATH), data["file"]

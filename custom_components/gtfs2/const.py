@@ -1,4 +1,6 @@
 """Constants for the GTFS integration."""
+from datetime import timedelta
+
 from homeassistant.const import CONF_OFFSET, STATE_UNKNOWN, Platform
 
 DOMAIN = "gtfs2"
@@ -17,6 +19,10 @@ DEFAULT_PATH = "gtfs2"
 DEFAULT_PATH_GEOJSON = "www/gtfs2"
 DEFAULT_PATH_RT = "www/gtfs2"
 DEFAULT_API_KEY_LOCATION = "not_applicable"
+
+# a failed static extraction is retried once, this long after it failed
+EXTRACTION_RETRY_DELAY = timedelta(minutes=15)
+DOCU_EXTRACTING = "https://github.com/vingerha/gtfs2/wiki/01:-Initial-Setup-of-the-Static-GTFS-Data-Source#extraction-of-data-from-the-datasource"
 
 CONF_DATA = "data"
 CONF_DESTINATION = "destination"
