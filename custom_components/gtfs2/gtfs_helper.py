@@ -467,8 +467,15 @@ STAGING_SUFFIX = ".sqlite_new"
 LOCK_SUFFIX = ".extracting"
 # what went wrong with the last extraction, until one succeeds
 FAILED_SUFFIX = ".extract_failed"
+# a feed being downloaded, until it is complete and replaces the zip
+DOWNLOAD_SUFFIX = ".zip_download"
 # left behind by the in-place zip rewrite of earlier versions
 LEGACY_TEMP_SUFFIXES = ("_temp.zip", "_temp_out.zip")
+# the live database, moved aside by the date check of earlier versions
+LEGACY_CURRENT_SUFFIX = ".sqlite_current"
+
+# what get_gtfs answers instead of a schedule when the datasource cannot be used
+GTFS_UNAVAILABLE = ("no_data_file", "no_zip_file", "extracting", "extraction_failed")
 
 # not loaded, to avoid a possibly very large database
 IGNORED_FEED_FILES = ("shapes.txt", "transfers.txt", "fare_attributes.txt", "translations.txt")
@@ -480,6 +487,8 @@ CALENDAR_TABLES = ("calendar", "calendar_dates")
 _EXTRACTION_LOCK = threading.Lock()
 # datasource -> error of the repair issue raised for it by this process
 _RAISED_ISSUES = {}
+# datasources whose feed this process is downloading
+_DOWNLOADS = set()
 
 
 def get_gtfs(hass, path, data, update=False):
@@ -497,7 +506,9 @@ def get_gtfs(hass, path, data, update=False):
         _headers = {data[CONF_API_KEY_NAME]: data[CONF_API_KEY]}
     file = data["file"] + ".zip"
     sqlite = data["file"] + ".sqlite"
-    check_source_dates = data.get("check_source_dates", False)
+    from_url = data["extract_from"] == "url"
+    # if update (servicecall) then check if new file does not only have future dates
+    check_source_dates = update and data.get("check_source_dates", False)
     ignore_files = IGNORED_FEED_FILES
     if data.get("clean_feed_info", False):
         ignore_files += ("feed_info.txt",)
@@ -506,47 +517,90 @@ def get_gtfs(hass, path, data, update=False):
     if state == "running":
         _LOGGER.debug("Cannot use this datasource as still unpacking: %s", filename)
         return "extracting"
-    if data["extract_from"] == "zip":
-        if not os.path.exists(os.path.join(gtfs_dir, file)):
-            _LOGGER.error("The given GTFS zipfile was not found")
-            return "no_zip_file"
-    if data["extract_from"] == "url":
-        if update or not os.path.exists(os.path.join(gtfs_dir, file)):
-            download = os.path.join(gtfs_dir, filename + ".zip_download")
-            try:
-                r = requests.get(url,headers=_headers, allow_redirects=True,timeout=15)
-                r.raise_for_status()
-                with open(download, "wb") as f:
-                    f.write(r.content)
-                os.replace(download, os.path.join(gtfs_dir, file))
-            except Exception as ex:  # pylint: disable=broad-except
-                _remove_files(download)
-                _LOGGER.error("The given URL or GTFS data file/folder was not found: %s", ex)
-                return "no_data_file"
+    if not from_url and not os.path.exists(os.path.join(gtfs_dir, file)):
+        _LOGGER.error("The given GTFS zipfile was not found")
+        return "no_zip_file"
+    if from_url and (update or not os.path.exists(os.path.join(gtfs_dir, file))):
+        try:
+            downloaded = _download_feed(gtfs_dir, filename, url, _headers, check_source_dates)
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.error("The given URL or GTFS data file/folder was not found: %s", ex)
+            return "no_data_file"
+        if not downloaded:
+            _LOGGER.info('New file contains only dates in the future, extracting terminated')
+            return
 
     if update:
-        # if update (servicecall) then check if new file does not only have future dates
-        if check_source_dates and not check_calendar_dates_from_zip(gtfs_dir, file):
+        if check_source_dates and not from_url and not check_calendar_dates_from_zip(os.path.join(gtfs_dir, file)):
             _LOGGER.info('New file contains only dates in the future, extracting terminated')
             return
         _start_extraction(gtfs_dir, filename, ignore_files, attempt=1)
         return "extracting"
 
     live_is_valid = not _missing_core_tables(os.path.join(gtfs_dir, sqlite))
-    if state == "failed":
-        if failure["attempt"] == 1 and time.time() - failure["at"] >= EXTRACTION_RETRY_DELAY.total_seconds():
-            _LOGGER.warning("Retrying the failed extraction of %s once, it failed with: %s", filename, failure["error"])
+    if state == "failed" and _claim_retry(gtfs_dir, filename):
+        _LOGGER.warning("Retrying the failed extraction of %s once, it failed with: %s", filename, failure["error"])
+        try:
+            # a feed that failed to load may well have been a bad download
+            if from_url:
+                _download_feed(gtfs_dir, filename, url, _headers)
+        except Exception as ex:  # pylint: disable=broad-except
+            with _EXTRACTION_LOCK:
+                _write_failure(gtfs_dir, filename, f"Downloading the feed again failed: {ex}", attempt=2)
+            _LOGGER.error("Retrying the extraction of %s failed to download the feed: %s", filename, ex)
+        else:
             _start_extraction(gtfs_dir, filename, ignore_files, attempt=2)
             if not live_is_valid:
                 return "extracting"
-        elif not live_is_valid:
-            _LOGGER.error("Extraction of datasource %s failed: %s", filename, failure["error"])
-            return "extraction_failed"
     if live_is_valid:
         return pygtfs.Schedule(os.path.join(gtfs_dir, f"{sqlite}?check_same_thread=False"))
+    if state == "failed":
+        failure = _read_failure(gtfs_dir, filename) or failure
+        _LOGGER.error("Extraction of datasource %s failed: %s", filename, failure["error"])
+        return "extraction_failed"
     _start_extraction(gtfs_dir, filename, ignore_files, attempt=1)
     _LOGGER.info("Started subprocess for unpacking: %s", file)
     return "extracting"
+
+
+def _download_feed(gtfs_dir, name, url, headers, check_source_dates=False):
+    """Download the feed and put it in place of <name>.zip.
+
+    It is written aside first, so an interrupted download never replaces the
+    zip. Returns False, leaving the current zip, when check_source_dates finds
+    that the new feed only runs in the future.
+    """
+    download = _datasource_file(gtfs_dir, name, DOWNLOAD_SUFFIX)
+    with _EXTRACTION_LOCK:
+        _DOWNLOADS.add(name)
+    try:
+        r = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
+        r.raise_for_status()
+        with open(download, "wb") as f:
+            f.write(r.content)
+        if check_source_dates and not check_calendar_dates_from_zip(download):
+            return False
+        os.replace(download, _datasource_file(gtfs_dir, name, ".zip"))
+        return True
+    finally:
+        _remove_files(download)
+        with _EXTRACTION_LOCK:
+            _DOWNLOADS.discard(name)
+
+
+def _claim_retry(gtfs_dir, name):
+    """Whether the one automatic retry of a failed extraction is due now.
+
+    The failure is marked as the retry's while still under the lock, so that
+    of two callers at the same moment, only one gets to retry.
+    """
+    with _EXTRACTION_LOCK:
+        failure = _read_failure(gtfs_dir, name)
+        if (failure is None or failure["attempt"] != 1
+                or time.time() - failure["at"] < EXTRACTION_RETRY_DELAY.total_seconds()):
+            return False
+        _write_failure(gtfs_dir, name, failure["error"], attempt=2)
+        return True
 
 
 def _datasource_file(gtfs_dir, name, suffix):
@@ -583,19 +637,19 @@ def _missing_core_tables(db_path):
     """Core tables of a datasource database that are missing or empty.
 
     Opened read-only, so a database that does not exist is not created, and one
-    an interrupted import left with a hot journal reads as unusable.
+    an interrupted import left with a hot journal reads as unusable. A database
+    another connection holds locked raises: it is in use, not empty.
     """
     if not os.path.exists(db_path):
         return list(CORE_TABLES)
-    try:
-        conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return list(CORE_TABLES)
+    conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
 
     def empty(table):
         try:
             return conn.execute(f"SELECT NOT EXISTS (SELECT 1 FROM {table})").fetchone()[0]
-        except sqlite3.Error:
+        except sqlite3.Error as ex:
+            if getattr(ex, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
             return True
 
     try:
@@ -656,7 +710,7 @@ def _run_extraction(gtfs_dir, name, ignore_files, attempt):
         schedule = pygtfs.Schedule(staging)
         try:
             pygtfs.append_feed(schedule, source, ignore_files=ignore_files)
-            _ensure_indexes(schedule)
+            check_datasource_index(schedule)
         finally:
             schedule.session.close()
             schedule.engine.dispose()
@@ -709,7 +763,7 @@ def _extraction_state(gtfs_dir, name):
                     _LOGGER.error("Extraction of datasource %s was interrupted before it completed", name)
             finally:
                 os.close(fd)
-        _recover_legacy_zip(gtfs_dir, name)
+        _remove_leftovers(gtfs_dir, name)
         failure = _read_failure(gtfs_dir, name)
         return ("failed" if failure else "idle"), failure
 
@@ -721,21 +775,33 @@ def _is_same_file(fd, path):
         return False
 
 
-def _recover_legacy_zip(gtfs_dir, name):
-    """Undo an in-place zip rewrite of an earlier version that was cut short.
+def _remove_leftovers(gtfs_dir, name):
+    """Clean up after writes that were cut short, while nothing is extracting.
 
-    That rewrite renamed <name>.zip to <name>_temp.zip and wrote the filtered
-    copy to <name>_temp_out.zip: the first is the original archive.
+    Also undoes what earlier versions left when they were cut short: the zip
+    renamed to <name>_temp.zip by the in-place rewrite (the filtered copy went
+    to <name>_temp_out.zip), and the live database renamed to
+    <name>.sqlite_current by the date check. Either is restored if it is the
+    only copy, dropped otherwise.
     """
-    source = _datasource_file(gtfs_dir, name, ".zip")
+    if name not in _DOWNLOADS:
+        _remove_files(_datasource_file(gtfs_dir, name, DOWNLOAD_SUFFIX))
+    _remove_files(_datasource_file(gtfs_dir, name, FAILED_SUFFIX + ".tmp"))
     temp, temp_out = (_datasource_file(gtfs_dir, name, suffix) for suffix in LEGACY_TEMP_SUFFIXES)
-    if os.path.exists(temp):
-        if os.path.exists(source):
-            os.remove(temp)
-        else:
-            _LOGGER.warning("Restoring %s left behind by an interrupted extraction", source)
-            os.replace(temp, source)
+    _restore_or_remove(temp, _datasource_file(gtfs_dir, name, ".zip"))
     _remove_files(temp_out)
+    _restore_or_remove(_datasource_file(gtfs_dir, name, LEGACY_CURRENT_SUFFIX),
+                       _datasource_file(gtfs_dir, name, ".sqlite"))
+
+
+def _restore_or_remove(moved, original):
+    if not os.path.exists(moved):
+        return
+    if os.path.exists(original):
+        os.remove(moved)
+    else:
+        _LOGGER.warning("Restoring %s left behind by an interrupted extraction", original)
+        os.replace(moved, original)
 
 
 def _sync_extraction_issue(hass, name, state, failure):
@@ -765,11 +831,12 @@ def _sync_extraction_issue(hass, name, state, failure):
     hass.loop.call_soon_threadsafe(call)
 
 
-def check_calendar_dates_from_zip(gtfs_dir,file):
-    _LOGGER.debug("Checking if file contains only future data: %s ", file)
+def check_calendar_dates_from_zip(path):
+    """Whether the feed at path runs today or earlier, i.e. not only in the future."""
+    _LOGGER.debug("Checking if file contains only future data: %s ", path)
     check_list=[]
     try:
-        with zipfile.ZipFile(os.path.join(gtfs_dir, file), 'r') as zin:
+        with zipfile.ZipFile(path, 'r') as zin:
             for item in zin.infolist():
                 if item.filename[0:8] == 'calendar' :
                     if item.filename == 'calendar.txt':
@@ -779,11 +846,11 @@ def check_calendar_dates_from_zip(gtfs_dir,file):
                     with zin.open(item.filename) as raw:
                         f = io.TextIOWrapper(raw, encoding="utf-8-sig")
                         header = f.readline().strip('\r\n')
-                        data = f.readlines()
                         index =header.replace('"','').split(',').index(column)
                         list = []
-                        for line in data:
-                            list.append(line.split(',')[index])
+                        for line in f:
+                            if line.strip():
+                                list.append(line.split(',')[index].strip().strip('"'))
                         check_list.append(min(list))
         min_date = datetime.datetime.strptime(min(check_list),"%Y%m%d")
         _LOGGER.debug("Youngest calender date from new files: %s, is: %s", check_list, min_date)
@@ -791,7 +858,8 @@ def check_calendar_dates_from_zip(gtfs_dir,file):
             _LOGGER.info("New file contains only dates in the future, keeping current")
             return False
     except Exception as ex:
-        _LOGGER.error("Error getting earliest dates from zip, continuing with extract, error: %s", ex)
+        _LOGGER.error("Error getting earliest dates from zip, keeping current, error: %s", ex)
+        return False
     return True
 
 
@@ -1619,21 +1687,21 @@ async def get_datasources(hass, path) -> dict[str]:
 def remove_datasource(hass, path, filename, include_sqlite):
     gtfs_dir = hass.config.path(path)
     _LOGGER.info(f"Removing datasource: {os.path.join(gtfs_dir, filename)}.*")
-    if include_sqlite and os.path.exists(os.path.join(gtfs_dir, filename + ".sqlite")):
-        os.remove(os.path.join(gtfs_dir, filename + ".sqlite"))
-    if os.path.exists(os.path.join(gtfs_dir, filename + "_temp.zip")):     
-        os.remove(os.path.join(gtfs_dir, filename + "_temp.zip"))
-    if os.path.exists(os.path.join(gtfs_dir, filename + "_temp_out.zip")):        
-        os.remove(os.path.join(gtfs_dir, filename + "_temp_out.zip"))
-    if os.path.exists(os.path.join(gtfs_dir, filename + ".sqlite-journal")):        
-        os.remove(os.path.join(gtfs_dir, filename + ".sqlite-journal"))
-    if os.path.exists(os.path.join(gtfs_dir, filename + ".zip")):        
-        os.remove(os.path.join(gtfs_dir, filename + ".zip"))        
-    _remove_staging(gtfs_dir, filename)
-    _remove_files(_datasource_file(gtfs_dir, filename, FAILED_SUFFIX))
+    # also clears a lock a killed extraction left
+    state, _ = _extraction_state(gtfs_dir, filename)
+    if state == "running":
+        # the extraction would put its database back once done
+        _LOGGER.warning("Cannot remove datasource %s while it is being extracted", filename)
+        return "extracting"
+    suffixes = [".zip", ".sqlite-journal", STAGING_SUFFIX, STAGING_SUFFIX + "-journal",
+                FAILED_SUFFIX, FAILED_SUFFIX + ".tmp", DOWNLOAD_SUFFIX,
+                LEGACY_CURRENT_SUFFIX, *LEGACY_TEMP_SUFFIXES]
+    if include_sqlite:
+        suffixes.append(".sqlite")
+    _remove_files(*(_datasource_file(gtfs_dir, filename, suffix) for suffix in suffixes))
     _sync_extraction_issue(hass, filename, "idle", None)
     return "removed"
-    
+
 def check_extracting(hass, gtfs_dir,file):
     _LOGGER.debug(f"Checking if extracting: %s", file)
     gtfs_dir = hass.config.path(gtfs_dir)
@@ -1645,16 +1713,13 @@ def check_extracting(hass, gtfs_dir,file):
     return False
 
 
-def check_datasource_index(hass, schedule, gtfs_dir, file):
-    _LOGGER.debug("Check datasource index for file: %s", file)
-    if check_extracting(hass, gtfs_dir,file):
-        _LOGGER.warning("Cannot check indexes on this datasource as still unpacking: %s", file)
-        return
-    _ensure_indexes(schedule)
+def check_datasource_index(schedule):
+    """Add the indexes the queries rely on, and fix routes without agency_id.
 
-
-def _ensure_indexes(schedule):
-    """Add the indexes the queries rely on, and fix routes without agency_id."""
+    Only ever given a schedule over a complete database: get_gtfs' live one,
+    or the extraction's staging one.
+    """
+    _LOGGER.debug("Check datasource index for: %s", schedule.db_filename)
     sql_index_1 = f"""
     SELECT count(*) as checkidx
     FROM sqlite_master
@@ -2249,10 +2314,17 @@ async def get_route_departures(hass, data):
     cf_options = config_entry.options
     _LOGGER.debug("config entry data: %s, options: %s", cf_data, cf_options)
     
-    if check_extracting(hass, DEFAULT_PATH, cf_data["file"]):
+    # also says whether the datasource is being extracted, off the event loop
+    _pygtfs = await hass.async_add_executor_job(
+        get_gtfs, hass, DEFAULT_PATH, cf_data, False
+    )
+    if _pygtfs == "extracting":
         _LOGGER.warning("Cannot get route departures on this datasource as still unpacking: %s", cf_data["file"])
         return {"today": [], "tomorrow": [], "extracting": True}
-    
+    if _pygtfs in GTFS_UNAVAILABLE:
+        _LOGGER.warning("Cannot get route departures on this datasource: %s, %s", cf_data["file"], _pygtfs)
+        return {"today": [], "tomorrow": [], "extracting": False, "error": _pygtfs}
+
     now = dt_util.now().replace(tzinfo=None)
     now_date = now.strftime(dt_util.DATE_STR_FORMAT)
     cutoff_today = datetime.datetime.strptime(now_date + ' ' + data.get('from_time','00:00:00'), "%Y-%m-%d %H:%M:%S")
@@ -2260,10 +2332,6 @@ async def get_route_departures(hass, data):
     tomorrow_date = tomorrow.strftime(dt_util.DATE_STR_FORMAT)
     cutoff_tomorrow = datetime.datetime.strptime(tomorrow_date + ' ' + data.get('from_time','00:00:00'), "%Y-%m-%d %H:%M:%S")
     _LOGGER.debug("Cutoff today: %s, cutoff tomorrow: %s", cutoff_today, cutoff_tomorrow)
-
-    _pygtfs = await hass.async_add_executor_job(
-        get_gtfs, hass, DEFAULT_PATH, cf_data, False
-    )
     
     _data = {
             "schedule": _pygtfs,
@@ -2313,10 +2381,17 @@ async def get_route_arrivals(hass, data):
     cf_options = config_entry.options
     _LOGGER.debug("config entry data: %s, options: %s", cf_data, cf_options)
     
-    if check_extracting(hass, DEFAULT_PATH, cf_data["file"]):
+    # also says whether the datasource is being extracted, off the event loop
+    _pygtfs = await hass.async_add_executor_job(
+        get_gtfs, hass, DEFAULT_PATH, cf_data, False
+    )
+    if _pygtfs == "extracting":
         _LOGGER.warning("Cannot get route arrivals on this datasource as still unpacking: %s", cf_data["file"])
         return {"today": [], "tomorrow": [], "extracting": True}
-    
+    if _pygtfs in GTFS_UNAVAILABLE:
+        _LOGGER.warning("Cannot get route arrivals on this datasource: %s, %s", cf_data["file"], _pygtfs)
+        return {"today": [], "tomorrow": [], "extracting": False, "error": _pygtfs}
+
     now = dt_util.now().replace(tzinfo=None)
     now_date = now.strftime(dt_util.DATE_STR_FORMAT)
     cutoff_today = datetime.datetime.strptime(now_date + ' ' + data.get('from_time','00:00:00'), "%Y-%m-%d %H:%M:%S")
@@ -2324,10 +2399,6 @@ async def get_route_arrivals(hass, data):
     tomorrow_date = tomorrow.strftime(dt_util.DATE_STR_FORMAT)
     cutoff_tomorrow = datetime.datetime.strptime(tomorrow_date + ' ' + data.get('from_time','00:00:00'), "%Y-%m-%d %H:%M:%S")
     _LOGGER.debug("Cutoff today: %s, cutoff tomorrow: %s", cutoff_today, cutoff_tomorrow)
-
-    _pygtfs = await hass.async_add_executor_job(
-        get_gtfs, hass, DEFAULT_PATH, cf_data, False
-    )
     
     _data = {
             "schedule": _pygtfs,
@@ -2378,9 +2449,16 @@ async def get_trip_stops(hass, data):
     config_entry = hass.config_entries.async_get_entry(entry.config_entry_id)
     cf_data = config_entry.data
     
-    if check_extracting(hass, DEFAULT_PATH, cf_data["file"]):
+    # also says whether the datasource is being extracted, off the event loop
+    schedule = await hass.async_add_executor_job(
+        get_gtfs, hass, DEFAULT_PATH, cf_data, False
+    )
+    if schedule == "extracting":
         _LOGGER.warning("Cannot get trip stops on this datasource as still unpacking: %s", cf_data["file"])
         return {"entity": data.get("entity_id","entity-not-found"), "trip_stops": {}, "extracting": True}
+    if schedule in GTFS_UNAVAILABLE:
+        _LOGGER.warning("Cannot get trip stops on this datasource: %s, %s", cf_data["file"], schedule)
+        return {"entity": data.get("entity_id","entity-not-found"), "trip_stops": {}, "extracting": False, "error": schedule}
     
     origin_station_ids=[]
     origin_station_names=[]
@@ -2398,10 +2476,6 @@ async def get_trip_stops(hass, data):
         origin_station_names.append(state.attributes.get("origin_station_stop_name", ""))
     
     trip_list = str(trips).replace("[","(").replace("]",")")
-
-    schedule = await hass.async_add_executor_job(
-        get_gtfs, hass, DEFAULT_PATH, cf_data, False
-    )
        
     sql_stops = f"""
     SELECT st.trip_id, s.stop_name, time(st.departure_time), s.stop_id
