@@ -19,6 +19,25 @@ NOTE: this will download and unpack the zip-file to a sqlite database, which can
 
 ![image](https://github.com/vingerha/gtfs2/assets/44190435/dd26f517-1cd9-4386-b4ea-c605d02a0ac7)
 
+### Filtered datasource: keep only the routes you use ###
+
+A full feed can be very large: a big network can take several GB once unpacked, too much for a Raspberry Pi.
+Tick **Filtered** when setting up the datasource, and you are asked which routes to keep before anything is unpacked.
+The database then only holds those routes, with the trips, stop times, stops (and their stations), calendars and agencies they need.
+
+- The datasource is listed as e.g. `carris (filtered: 2 routes - 1234, 5678)`.
+- To keep more or fewer routes later, use **Choose the routes an existing data source keeps** in the menu.
+  This rebuilds the datasource from its zip file; the current database stays in use until the new one is complete,
+  and a failed rebuild leaves it in place (see Settings > Repairs for the reason).
+  Turn **Filtered** off there to go back to the full feed. Saving the routes the datasource already holds does not rebuild it.
+  A filtered setup you left before choosing its routes shows up there as `(not built)`, and can also be removed.
+- A route that sensors still use cannot be removed: delete those sensors first.
+  Train sensors need the full feed, so a datasource they use cannot be filtered.
+- When the feed has no trips (any more) for a kept route, the datasource is built with its other routes,
+  and Settings > Repairs warns about the missing one. It comes back by itself once a feed has it again.
+- Updating the datasource (action `gtfs2.update_gtfs`) keeps the same routes.
+- Sensors near a location (local stops) only find the stops of the kept routes.
+
 
 ## Select the route ##
 

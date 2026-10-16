@@ -1,8 +1,28 @@
 {
   "config": {
     "step": {
+      "source_routes": {
+        "data": {
+          "routes": "Zu behaltende Linien"
+        },
+        "description": "Nur diese Linien und die Haltestellen, Verkehrstage und Betreiber, die sie benötigen, werden in die Datenbank geladen. Sie können sie später über das Menü ändern. [(docu)]({docu_extracting})"
+      },
+      "datasource_routes": {
+        "data": {
+          "file": "Quelle auswählen"
+        },
+        "description": "Die Datenquelle auswählen, deren Linien geändert werden sollen [(docu)]({docu_select_source})"
+      },
+      "retained_routes": {
+        "data": {
+          "filter_routes": "Gefiltert: nur die ausgewählten Linien behalten",
+          "routes": "Zu behaltende Linien"
+        },
+        "description": "Beim Speichern wird die Datenquelle aus ihrer ZIP-Datei neu aufgebaut. Die aktuelle Datenbank bleibt in Gebrauch, bis die neue fertig ist. Schalten Sie die Filterung aus, um wieder den vollständigen Feed zu laden. [(docu)]({docu_extracting})"
+      },
       "user": {
         "menu_options": {
+          "datasource_routes": "Die Linien einer vorhandenen Datenquelle auswählen (gefilterte Datenquelle)",
           "start_end": "Fahrplan für Start-/Endstopps erstellen",
           "local_stops": "Geplante Abfahrt an Haltestellen in Ihrer Nähe",
           "source": "Eine neue Datenquelle einrichten",
@@ -26,6 +46,7 @@
       },
       "source": {
         "data": {
+          "filter_routes": "Gefiltert: nur die ausgewählten Linien behalten (kleinere Datenbank)",
           "file": "Neuer Name der Datenquellen",
           "url": "Externe URL zur GTFS-Datendatei (zip)",
           "api_key": "API-Schlüssel, falls erforderlich",
@@ -89,6 +110,10 @@
       }
     },
     "error": {
+      "no_routes_selected": "Mindestens eine Linie auswählen",
+      "route_in_use": "Diese Sensoren benötigen Linien, die der Filter auslässt (ein Zug-Sensor benötigt den vollständigen Feed), bitte zuerst löschen: {sensors}",
+      "route_not_retained": "Diese Datenquelle behält nur die Linien {routes}. Fügen Sie diese Linie über 'Die Linien einer vorhandenen Datenquelle auswählen' im Menü hinzu, wodurch die Datenquelle neu aufgebaut wird, und versuchen Sie es dann erneut",
+      "route_not_found": "Diese Linie ist nicht in der Datenquelle enthalten",
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "unknown": "[%key:common::config_flow::error::unknown%]",
@@ -98,6 +123,9 @@
       "no_zip_file": "Problem bei der Datenerfassung: ZIP-Datei nicht im richtigen Ordner"
     },
     "abort": {
+      "no_change": "Die Datenquelle enthält diese Linien bereits, es gibt nichts neu aufzubauen",
+      "extraction_failed": "Das Extrahieren der Daten dieser Datenquelle ist fehlgeschlagen, den Grund finden Sie unter Einstellungen > Reparaturen [(docu)]({docu_extracting})",
+      "rebuild_started": "Die Datenquelle wird mit den ausgewählten Linien neu aufgebaut. Die aktuelle Datenbank bleibt in Gebrauch, bis die neue fertig ist [(docu)]({docu_extracting})",
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "files_deleted": "Datenquelle gelöscht, dies kann sich auf bestehende Routen auswirken",
       "stop_incorrect": "Start- und/oder Endziel falsch, möglicherweise kein Transport ‚heute‘ oder nicht in die gleiche Richtung, Protokolle prüfen",
@@ -168,6 +196,16 @@
         "header": "header: den Aufruf mit Header/Schlüssel aufbauen",
         "query_string": "query-string: den Aufruf mit Query/Schlüssel aufbauen"
       }
+    }
+  },
+  "issues": {
+    "routes_missing": {
+      "title": "GTFS-Datenquelle {datasource} wurde ohne einige Linien aufgebaut",
+      "description": "Der Feed der Datenquelle '{datasource}' enthält keine Fahrten für diese Linien, die behalten werden sollen: {routes}.\n\nDie Datenquelle wurde mit ihren übrigen Linien aufgebaut. Die fehlenden Linien kommen von selbst zurück, sobald eine Aktualisierung des Feeds wieder Fahrten für sie enthält. Wenn sie endgültig weggefallen sind, entfernen Sie sie über 'Die Linien einer vorhandenen Datenquelle auswählen' im GTFS2-Menü."
+    },
+    "extraction_failed": {
+      "title": "GTFS-Datenquelle {datasource} konnte nicht extrahiert werden",
+      "description": "Das Extrahieren der statischen GTFS-Daten der Datenquelle '{datasource}' ist fehlgeschlagen:\n\n{error}\n\nDie bisherigen Daten dieser Datenquelle, falls vorhanden, werden weiter verwendet. GTFS2 wiederholt eine fehlgeschlagene Extraktion einmal selbst, 15 Minuten nach dem Fehler. Bleibt diese Meldung bestehen, beheben Sie das Problem mit der Quelle und führen Sie die Aktion 'gtfs2.update_gtfs' für diese Datenquelle aus, oder entfernen Sie die Datenquelle und fügen Sie sie erneut hinzu."
     }
   },
   "services": {

@@ -1,8 +1,28 @@
 {
   "config": {
     "step": {
+      "source_routes": {
+        "data": {
+          "routes": "Routes to keep"
+        },
+        "description": "Only these routes, and the stops, services and agencies they need, are loaded into the database. You can change them later from the menu. [(docu)]({docu_extracting})"
+      },
+      "datasource_routes": {
+        "data": {
+          "file": "Select source"
+        },
+        "description": "Select the data source whose routes to change [(docu)]({docu_select_source})"
+      },
+      "retained_routes": {
+        "data": {
+          "filter_routes": "Filtered: keep only the selected routes",
+          "routes": "Routes to keep"
+        },
+        "description": "Saving rebuilds the data source from its zip file. The current database stays in use until the new one is complete. Turn filtering off to load the full feed again. [(docu)]({docu_extracting})"
+      },
       "user": {
 		"menu_options": {
+          "datasource_routes": "Choose the routes an existing data source keeps (filtered data source)",
           "start_end": "Create schedule on start/end stops",
           "local_stops": "Scheduled departure on stops in your vicinity",
 		  "source": "Setup a new data source",
@@ -26,6 +46,7 @@
       },	  
       "source": {
         "data": {
+          "filter_routes": "Filtered: keep only the routes I select (smaller database)",
           "file": "New datasource name",
           "url": "external url to gtfs data (zip) file",
           "api_key": "API key, if required",
@@ -90,6 +111,10 @@
       }	
     },
     "error": {
+      "no_routes_selected": "Select at least one route",
+      "route_in_use": "These sensors need routes the filter leaves out (a train sensor needs the full feed), delete them first: {sensors}",
+      "route_not_retained": "This data source only keeps the routes {routes}. Add this route with 'Choose the routes an existing data source keeps' in the menu, which rebuilds the data source, then try again",
+      "route_not_found": "This route is not in the data source",
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "unknown": "[%key:common::config_flow::error::unknown%]",
@@ -99,6 +124,8 @@
 	  "no_zip_file": "Data collection issue: ZIP file not in the correct folder"
     },
     "abort": {
+      "no_change": "The data source already holds these routes, nothing to rebuild",
+      "rebuild_started": "Rebuilding the data source with the chosen routes. The current database stays in use until the new one is ready [(docu)]({docu_extracting})",
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "files_deleted": "Datasource deleted, this may affect existing routes",
       "stop_incorrect": "Start and/or End destination incorrect, \n possibly no transport 'today' or not in same direction, \n please check logs",
@@ -146,6 +173,10 @@
     }
   },
   "issues": {
+    "routes_missing": {
+      "title": "GTFS datasource {datasource} was built without some routes",
+      "description": "The feed of datasource '{datasource}' has no trips for these routes it should keep: {routes}.\n\nThe datasource was built with its other routes. The missing routes come back by themselves once an update of the feed has trips for them again. If they are gone for good, remove them with 'Choose the routes an existing data source keeps' in the GTFS2 menu."
+    },
     "extraction_failed": {
       "title": "GTFS datasource {datasource} could not be extracted",
       "description": "Extracting the static GTFS data of datasource '{datasource}' failed:\n\n{error}\n\nThe previous data of this datasource, if there is any, is still in use. GTFS2 retries a failed extraction once by itself, 15 minutes after it failed. If this message stays, fix the source and run the 'gtfs2.update_gtfs' action for this datasource, or remove the datasource and add it again."

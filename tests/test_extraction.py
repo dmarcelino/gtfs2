@@ -74,29 +74,6 @@ def write_feed(path, *, calendar=CALENDAR, stop_times=STOP_TIMES, stop_name="One
             archive.writestr(name, content)
 
 
-@pytest.fixture
-def hass(tmp_path):
-    return SimpleNamespace(
-        config=SimpleNamespace(path=lambda *parts: os.path.join(str(tmp_path), *parts)),
-        loop=SimpleNamespace(call_soon_threadsafe=lambda callback, *args: callback(*args)),
-    )
-
-
-@pytest.fixture
-def gtfs_dir(tmp_path):
-    path = tmp_path / GTFS_PATH
-    path.mkdir()
-    return path
-
-
-@pytest.fixture
-def ir(monkeypatch):
-    mock = Mock()
-    monkeypatch.setattr(gtfs_helper, "ir", mock)
-    monkeypatch.setattr(gtfs_helper, "_RAISED_ISSUES", {})
-    return mock
-
-
 def data(name=NAME, **extra):
     return {"file": name, "url": "na", "extract_from": "zip", **extra}
 

@@ -1,8 +1,28 @@
 {
   "config": {
     "step": {
+      "source_routes": {
+        "data": {
+          "routes": "Líneas a conservar"
+        },
+        "description": "Solo estas líneas, y las paradas, servicios y operadores que necesitan, se cargan en la base de datos. Puede cambiarlas más tarde desde el menú. [(docu)]({docu_extracting})"
+      },
+      "datasource_routes": {
+        "data": {
+          "file": "Seleccionar fuente"
+        },
+        "description": "Seleccione la fuente de datos cuyas líneas quiere cambiar [(docu)]({docu_select_source})"
+      },
+      "retained_routes": {
+        "data": {
+          "filter_routes": "Filtrada: conservar solo las líneas seleccionadas",
+          "routes": "Líneas a conservar"
+        },
+        "description": "Al guardar se reconstruye la fuente de datos a partir de su archivo zip. La base de datos actual sigue en uso hasta que la nueva esté completa. Desactive el filtro para cargar de nuevo el feed completo. [(docu)]({docu_extracting})"
+      },
       "user": {
 		"menu_options": {
+          "datasource_routes": "Elegir las líneas que conserva una fuente de datos existente (fuente filtrada)",
           "start_end": "Crear horarios en paradas de inicio/fin",
           "local_stops": "Salida programada en paradas cercanas",
 		  "source": "Configurar una nueva fuente de datos",
@@ -26,6 +46,7 @@
       },	  
       "source": {
         "data": {
+          "filter_routes": "Filtrada: conservar solo las líneas que elija (base de datos más pequeña)",
           "file": "Nuevo nombre de la fuente de datos",
           "url": "url externa al archivo de datos gtfs (zip)",
           "api_key": "Clave API, si es necesaria",
@@ -89,6 +110,10 @@
       }	
     },
     "error": {
+      "no_routes_selected": "Seleccione al menos una línea",
+      "route_in_use": "Estos sensores necesitan líneas que el filtro deja fuera (un sensor de tren necesita el feed completo), elimínelos primero: {sensors}",
+      "route_not_retained": "Esta fuente de datos solo conserva las líneas {routes}. Añada esta línea con 'Elegir las líneas que conserva una fuente de datos existente' en el menú, que reconstruye la fuente, y vuelva a intentarlo",
+      "route_not_found": "Esta línea no está en la fuente de datos",
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "unknown": "[%key:common::config_flow::error::unknown%]",
@@ -98,6 +123,9 @@
 	  "no_zip_file": "Problema de recopilación de datos: el archivo ZIP no está en la carpeta correcta"
     },
     "abort": {
+      "no_change": "La fuente de datos ya contiene estas líneas, no hay nada que reconstruir",
+      "extraction_failed": "La extracción de los datos de esta fuente de datos ha fallado, consulte el motivo en Ajustes > Reparaciones [(docu)]({docu_extracting})",
+      "rebuild_started": "Reconstruyendo la fuente de datos con las líneas elegidas. La base de datos actual sigue en uso hasta que la nueva esté lista [(docu)]({docu_extracting})",
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "files_deleted": "Fuente de datos eliminada, esto puede afectar a las rutas existentes",
       "stop_incorrect": "Destino inicial y/o final incorrecto, posiblemente no hay transporte 'hoy' o no en la misma dirección, compruebe los registros",
@@ -168,6 +196,16 @@
         "header": "header: construir la llamada con cabecera/clave",
         "query_string": "query-string: construir la llamada con consulta/clave"
       }
+    }
+  },
+  "issues": {
+    "routes_missing": {
+      "title": "La fuente de datos GTFS {datasource} se ha construido sin algunas líneas",
+      "description": "El feed de la fuente de datos '{datasource}' no tiene viajes para estas líneas que debe conservar: {routes}.\n\nLa fuente de datos se ha construido con sus demás líneas. Las líneas que faltan vuelven por sí solas en cuanto una actualización del feed vuelva a tener viajes para ellas. Si han desaparecido definitivamente, quítelas con 'Elegir las líneas que conserva una fuente de datos existente' en el menú de GTFS2."
+    },
+    "extraction_failed": {
+      "title": "No se ha podido extraer la fuente de datos GTFS {datasource}",
+      "description": "La extracción de los datos GTFS estáticos de la fuente de datos '{datasource}' ha fallado:\n\n{error}\n\nLos datos anteriores de esta fuente de datos, si los hay, siguen en uso. GTFS2 reintenta una extracción fallida una vez por sí mismo, 15 minutos después del fallo. Si este mensaje persiste, corrija la fuente y ejecute la acción 'gtfs2.update_gtfs' para esta fuente de datos, o elimine la fuente de datos y vuelva a añadirla."
     }
   },
   "services": {

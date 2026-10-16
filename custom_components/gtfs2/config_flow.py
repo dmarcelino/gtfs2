@@ -37,6 +37,8 @@ from .const import (
     CONF_AGENCY,
     CONF_ROUTE_TYPE,
     CONF_ROUTE,
+    CONF_FILTER_ROUTES,
+    CONF_ROUTES,
     CONF_DIRECTION,
     CONF_LOOP_DIRECTION,
     CONF_ORIGIN,
@@ -64,12 +66,18 @@ from .gtfs_helper import (
     get_datasources,
     remove_datasource,
     check_datasource_index,
+    fetch_source,
+    retained_route_choices,
+    route_left_out,
+    rebuild_with_routes,
+    parse_route_option,
     GTFS_UNAVAILABLE,
     get_agency_list,
     get_local_stop_list,
     get_train_station_list,
     get_train_destination_list
 )
+from .feed_filter import routes_in_use
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,6 +102,15 @@ def _stop_name_of(entry):
     return name
 
 
+def _route_option(routes, value):
+    """The entry of get_route_list the route field names: the one picked, or
+    the one of the route_id typed in. None when there is no such route."""
+    if value in routes:
+        return value
+    route_id = value.strip()
+    return next((r for r in routes if parse_route_option(r)[1] == route_id), None)
+
+
 @config_entries.HANDLERS.register(DOMAIN)
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for GTFS."""
@@ -116,7 +133,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         
         return self.async_show_menu(
             step_id="user",
-            menu_options=["start_end", "local_stops", "source","remove"],
+            menu_options=["start_end", "local_stops", "source", "datasource_routes", "remove"],
             description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS,
         )
                    
@@ -201,11 +218,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 translation_key="api_key_location",
                             )
                         ),
+                        vol.Optional(CONF_FILTER_ROUTES, default=False): bool,
                     },
                 ),
                 description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS,
                 errors=errors,
             )
+        if user_input.pop(CONF_FILTER_ROUTES, False):
+            # the routes are chosen from the feed before any database is built
+            unavailable = await self.hass.async_add_executor_job(
+                fetch_source, self.hass, DEFAULT_PATH, user_input
+            )
+            if unavailable:
+                return self.async_abort(reason=unavailable, description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS)
+            self._user_inputs.update(user_input)
+            return await self.async_step_source_routes()
         check_data = await self._check_data(user_input)
         if check_data :
             errors["base"] = check_data
@@ -215,11 +242,90 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.debug(f"UserInputs Source: {self._user_inputs}")
             return await self.async_step_agency()            
 
+    async def async_step_source_routes(self, user_input: dict | None = None) -> FlowResult:
+        """Choose the routes a new filtered datasource retains, then build it."""
+        return await self._retained_routes_step("source_routes", user_input, done="extracting")
+
+    async def async_step_datasource_routes(self, user_input: dict | None = None) -> FlowResult:
+        """Pick the datasource whose retained routes to change."""
+        if user_input is None:
+            # also one whose filtered setup was left at its routes
+            datasources = await get_datasources(self.hass, DEFAULT_PATH, include_unbuilt=True)
+            return self.async_show_form(
+                step_id="datasource_routes",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_FILE, default=""): vol.In(datasources),
+                    },
+                ),
+                description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS,
+            )
+        self._user_inputs.update(user_input)
+        return await self.async_step_retained_routes()
+
+    async def async_step_retained_routes(self, user_input: dict | None = None) -> FlowResult:
+        """Change which routes a datasource retains, or retain all, and rebuild it."""
+        return await self._retained_routes_step("retained_routes", user_input, done="rebuild_started")
+
+    async def _retained_routes_step(self, step_id, user_input, done):
+        """Ask which routes datasource self._user_inputs[CONF_FILE] retains,
+        and rebuild it with them, aborting with reason done once started.
+
+        A new datasource is filtered by definition; an existing one can be
+        switched back to the full feed. Routes that sensors still follow
+        cannot be dropped.
+        """
+        name = self._user_inputs[CONF_FILE]
+        new = step_id == "source_routes"
+        choices = await self.hass.async_add_executor_job(
+            retained_route_choices, self.hass, DEFAULT_PATH, name
+        )
+        if choices is None:
+            return self.async_abort(reason="no_zip_file", description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS)
+        options, selected = choices
+        errors: dict[str, str] = {}
+        placeholders = dict(TRANSLATION_DESCRIPTION_PLACEHOLDERS, sensors="")
+        if user_input is not None:
+            filtered = new or user_input.get(CONF_FILTER_ROUTES, False)
+            routes = user_input.get(CONF_ROUTES, []) if filtered else []
+            in_use = routes_in_use(self.hass.config_entries.async_entries(DOMAIN), name, routes) if routes else []
+            if filtered and not routes:
+                errors["base"] = "no_routes_selected"
+            elif in_use:
+                errors["base"] = "route_in_use"
+                placeholders["sensors"] = ", ".join(
+                    f"{entry.title} ({entry.data[CONF_ROUTE]})" for entry in in_use)
+            else:
+                # a new datasource's feed was just fetched: it is built whatever
+                # an earlier one of that name holds
+                result = await self.hass.async_add_executor_job(
+                    rebuild_with_routes, self.hass, DEFAULT_PATH, name, routes, not new
+                )
+                reason = {"started": done, "unchanged": "no_change"}.get(result, result)
+                return self.async_abort(reason=reason, description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS)
+            selected = routes or selected
+        schema = {}
+        if not new:
+            schema[vol.Optional(CONF_FILTER_ROUTES, default=bool(selected))] = bool
+        schema[vol.Optional(CONF_ROUTES, default=selected)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[selector.SelectOptionDict(value=route_id, label=label) for route_id, label in options],
+                multiple=True,
+                mode=selector.SelectSelectorMode.DROPDOWN,
+            )
+        )
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=vol.Schema(schema),
+            description_placeholders=placeholders,
+            errors=errors,
+        )
+
     async def async_step_remove(self, user_input: dict | None = None) -> FlowResult:
         """Handle a flow initialized by the user."""
         errors: dict[str, str] = {}
         if user_input is None:
-            datasources = await get_datasources(self.hass, DEFAULT_PATH)
+            datasources = await get_datasources(self.hass, DEFAULT_PATH, include_unbuilt=True)
             return self.async_show_form(
                 step_id="remove",
                 data_schema=vol.Schema(
@@ -323,10 +429,26 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._pygtfs = await self.hass.async_add_executor_job(
             get_gtfs, self.hass, DEFAULT_PATH, self._user_inputs, False
         )
-        if user_input is None:
+        routes = await self.hass.async_add_executor_job(
+            get_route_list, self._pygtfs, self._user_inputs
+        )
+        placeholders = dict(TRANSLATION_DESCRIPTION_PLACEHOLDERS, routes="")
+        if user_input is not None:
+            chosen = _route_option(routes, user_input.get(CONF_ROUTE, ""))
+            if chosen is None:
+                retained = await self.hass.async_add_executor_job(
+                    route_left_out, self.hass, DEFAULT_PATH, self._user_inputs[CONF_FILE],
+                    user_input.get(CONF_ROUTE, "").strip()
+                )
+                if retained:
+                    errors["base"] = "route_not_retained"
+                    placeholders["routes"] = ", ".join(retained)
+                else:
+                    errors["base"] = "route_not_found"
+        if user_input is None or errors:
             route_list = [
                 selector.SelectOptionDict(value=r, label=r.split('##')[1])
-                for r in get_route_list(self._pygtfs, self._user_inputs)
+                for r in routes
                 ]
             return self.async_show_form(
                 step_id="route",
@@ -335,12 +457,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         vol.Required(CONF_ROUTE, default = ""): selector.SelectSelector(selector.SelectSelectorConfig(options=route_list, translation_key="route",custom_value=True)),
                     },
                 ),
-                description_placeholders=TRANSLATION_DESCRIPTION_PLACEHOLDERS,
+                description_placeholders=placeholders,
                 errors=errors,
             )
-        user_input[CONF_ROUTE_TYPE] = user_input.get(CONF_ROUTE).split('##')[0] 
-        user_input[CONF_ROUTE] = user_input.get(CONF_ROUTE).split('##')[1].split(": (")[0]   
-               
+        user_input[CONF_ROUTE_TYPE], user_input[CONF_ROUTE] = parse_route_option(chosen)
+
         # no direction is asked: the rider picks where they are and where they
         # go, and the order of the stops on a trip says which way that is
         user_input[CONF_DIRECTION] = None

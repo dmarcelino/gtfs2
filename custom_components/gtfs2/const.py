@@ -282,6 +282,9 @@ CONF_DEVICE_TRACKER_ID = "device_tracker_id"
 CONF_AGENCY = "agency"
 CONF_ROUTE_TYPE = "route_type"
 CONF_ROUTE = "route"
+# a datasource built with only some routes, and which ones
+CONF_FILTER_ROUTES = "filter_routes"
+CONF_ROUTES = "routes"
 CONF_DIRECTION = "direction"
 # the rotation an entry keeps at a loop's terminus, the only direction the
 # departure query reads: entries created before it carry none

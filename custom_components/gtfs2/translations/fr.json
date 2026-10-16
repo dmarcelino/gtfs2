@@ -1,8 +1,28 @@
 {
   "config": {
     "step": {
+      "source_routes": {
+        "data": {
+          "routes": "Lignes à conserver"
+        },
+        "description": "Seules ces lignes, et les arrêts, services et opérateurs dont elles ont besoin, sont chargés dans la base de données. Vous pourrez les modifier plus tard depuis le menu. [(docu)]({docu_extracting})"
+      },
+      "datasource_routes": {
+        "data": {
+          "file": "Sélectionner la source"
+        },
+        "description": "Sélectionner la source de données dont les lignes doivent changer [(docu)]({docu_select_source})"
+      },
+      "retained_routes": {
+        "data": {
+          "filter_routes": "Filtrée : ne conserver que les lignes choisies",
+          "routes": "Lignes à conserver"
+        },
+        "description": "L'enregistrement reconstruit la source de données à partir de son fichier zip. La base de données actuelle reste utilisée jusqu'à ce que la nouvelle soit complète. Désactivez le filtre pour charger à nouveau le flux complet. [(docu)]({docu_extracting})"
+      },
       "user": {
 		"menu_options": {
+          "datasource_routes": "Choisir les lignes conservées par une source de données existante (source filtrée)",
           "start_end": "Horaires pour stops",
           "local_stops": "Départs prochaines autour",
 		  "source": "Ajouter une source de données",
@@ -26,6 +46,7 @@
       },					   
       "source": {
         "data": {
+          "filter_routes": "Filtrée : ne conserver que les lignes choisies (base de données plus petite)",
           "file": "Nom de la nouvelle source de données",
           "url": "URL externe vers le fichier (zip) des données GTFS",
           "api_key": "API_KEY, si nécessaire",
@@ -89,6 +110,10 @@
       }	
     },			  
     "error": {
+      "no_routes_selected": "Sélectionnez au moins une ligne",
+      "route_in_use": "Ces capteurs ont besoin de lignes que le filtre écarte (un capteur de train a besoin du flux complet), supprimez-les d'abord : {sensors}",
+      "route_not_retained": "Cette source de données ne conserve que les lignes {routes}. Ajoutez cette ligne avec 'Choisir les lignes conservées par une source de données existante' dans le menu, ce qui reconstruit la source, puis réessayez",
+      "route_not_found": "Cette ligne n'existe pas dans la source de données",
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "unknown": "[%key:common::config_flow::error::unknown%]",
@@ -98,6 +123,9 @@
 	  "no_zip_file": "Problème de collecte de données : fichier ZIP ne se trouve pas dans le bon dossier"
     },
     "abort": {
+      "no_change": "La source de données contient déjà ces lignes, rien à reconstruire",
+      "extraction_failed": "L'extraction des données de cette source de données a échoué, voir Paramètres > Réparations pour la raison [(docu)]({docu_extracting})",
+      "rebuild_started": "Reconstruction de la source de données avec les lignes choisies. La base de données actuelle reste utilisée jusqu'à ce que la nouvelle soit prête [(docu)]({docu_extracting})",
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "files_deleted": "Source de données supprimée, cela peut affecter les itinéraires existants",
       "stop_incorrect": "Arrêt de départ et/ou de fin incorrecte, éventuellement pas de transport « aujourd'hui » ou pas dans la même direction, vérifiez logs d'érreur",
@@ -168,6 +196,16 @@
         "header": "header : construire l'appel avec en-tête/clé",
         "query_string": "query-string : construire l'appel avec requête/clé"
       }
+    }
+  },
+  "issues": {
+    "routes_missing": {
+      "title": "La source de données GTFS {datasource} a été construite sans certaines lignes",
+      "description": "Le flux de la source de données '{datasource}' n'a aucun trajet pour ces lignes à conserver : {routes}.\n\nLa source de données a été construite avec ses autres lignes. Les lignes manquantes reviennent d'elles-mêmes dès qu'une mise à jour du flux contient à nouveau des trajets pour elles. Si elles ont disparu pour de bon, retirez-les avec 'Choisir les lignes conservées par une source de données existante' dans le menu GTFS2."
+    },
+    "extraction_failed": {
+      "title": "La source de données GTFS {datasource} n'a pas pu être extraite",
+      "description": "L'extraction des données GTFS statiques de la source de données '{datasource}' a échoué :\n\n{error}\n\nLes données précédentes de cette source, s'il y en a, restent utilisées. GTFS2 relance une fois de lui-même une extraction échouée, 15 minutes après l'échec. Si ce message persiste, corrigez la source et lancez l'action 'gtfs2.update_gtfs' pour cette source de données, ou supprimez la source de données et ajoutez-la à nouveau."
     }
   },
   "services": {

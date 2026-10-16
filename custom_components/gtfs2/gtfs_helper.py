@@ -15,6 +15,7 @@ import glob
 import json
 import threading
 import time
+import shutil
 import requests
 import pygtfs
 from sqlalchemy.sql import text
@@ -50,6 +51,24 @@ from .const import (
     TIME_STR_FORMAT
     )
 from .gtfs_rt_helper import get_rt_route_trip_statuses, get_gtfs_rt, safe_file_part, get_gtfs_feed_entities
+from .feed_filter import (
+    FILTER_SUFFIX,
+    FILTERED_FEED_SUFFIX,
+    MISSING_ROUTES_SUFFIX,
+    check_integrity,
+    feed_routes,
+    missing_route_data,
+    read_filter,
+    read_missing_routes,
+    record_retained_routes,
+    remove_routes,
+    retained_routes,
+    route_id_of,
+    route_label,
+    write_filter,
+    write_filtered_feed,
+    write_missing_routes,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -487,23 +506,18 @@ CALENDAR_TABLES = ("calendar", "calendar_dates")
 _EXTRACTION_LOCK = threading.Lock()
 # datasource -> error of the repair issue raised for it by this process
 _RAISED_ISSUES = {}
+# datasource -> routes of the missing routes issue raised for it by this process
+_RAISED_MISSING_ROUTES = {}
 # datasources whose feed this process is downloading
 _DOWNLOADS = set()
 
 
 def get_gtfs(hass, path, data, update=False):
     _LOGGER.debug("Getting gtfs with data: %s", data)
-    _headers = None
     gtfs_dir = hass.config.path(path)
     os.makedirs(gtfs_dir, exist_ok=True)
     filename = data["file"]
-    url = data["url"]
-    if data.get(CONF_API_KEY_LOCATION, None) == "query_string":
-      if data.get(CONF_API_KEY, None):
-        url = url + "?" + data[CONF_API_KEY_NAME] + "=" + data[CONF_API_KEY]
-    if data.get(CONF_API_KEY_LOCATION, None) == "header":
-      if data.get(CONF_API_KEY, None):
-        _headers = {data[CONF_API_KEY_NAME]: data[CONF_API_KEY]}
+    url, _headers = _feed_request(data)
     file = data["file"] + ".zip"
     sqlite = data["file"] + ".sqlite"
     from_url = data["extract_from"] == "url"
@@ -517,18 +531,12 @@ def get_gtfs(hass, path, data, update=False):
     if state == "running":
         _LOGGER.debug("Cannot use this datasource as still unpacking: %s", filename)
         return "extracting"
-    if not from_url and not os.path.exists(os.path.join(gtfs_dir, file)):
-        _LOGGER.error("The given GTFS zipfile was not found")
-        return "no_zip_file"
-    if from_url and (update or not os.path.exists(os.path.join(gtfs_dir, file))):
-        try:
-            downloaded = _download_feed(gtfs_dir, filename, url, _headers, check_source_dates)
-        except Exception as ex:  # pylint: disable=broad-except
-            _LOGGER.error("The given URL or GTFS data file/folder was not found: %s", ex)
-            return "no_data_file"
-        if not downloaded:
-            _LOGGER.info('New file contains only dates in the future, extracting terminated')
-            return
+    _sync_missing_routes_issue(hass, gtfs_dir, filename)
+    unavailable = _acquire_feed(gtfs_dir, data, update, check_source_dates)
+    if unavailable == "future_only":
+        return
+    if unavailable:
+        return unavailable
 
     if update:
         if check_source_dates and not from_url and not check_calendar_dates_from_zip(os.path.join(gtfs_dir, file)):
@@ -561,6 +569,60 @@ def get_gtfs(hass, path, data, update=False):
     _start_extraction(gtfs_dir, filename, ignore_files, attempt=1)
     _LOGGER.info("Started subprocess for unpacking: %s", file)
     return "extracting"
+
+
+def fetch_source(hass, path, data):
+    """Put the feed of a datasource in place without extracting it.
+
+    Lets the config flow offer the feed's routes before a database is built.
+    A URL feed is always downloaded, not taken from a zip a setup that was
+    left half-way already put there. Returns None once <name>.zip is there,
+    or why it is not.
+    """
+    gtfs_dir = hass.config.path(path)
+    os.makedirs(gtfs_dir, exist_ok=True)
+    state, _ = _extraction_state(gtfs_dir, data["file"])
+    if state == "running":
+        return "extracting"
+    return _acquire_feed(gtfs_dir, data, update=True)
+
+
+def _feed_request(data):
+    """(url, headers) to download the feed with, the API key where it goes."""
+    url = data["url"]
+    headers = None
+    if data.get(CONF_API_KEY_LOCATION, None) == "query_string":
+      if data.get(CONF_API_KEY, None):
+        url = url + "?" + data[CONF_API_KEY_NAME] + "=" + data[CONF_API_KEY]
+    if data.get(CONF_API_KEY_LOCATION, None) == "header":
+      if data.get(CONF_API_KEY, None):
+        headers = {data[CONF_API_KEY_NAME]: data[CONF_API_KEY]}
+    return url, headers
+
+
+def _acquire_feed(gtfs_dir, data, update, check_source_dates=False):
+    """Make sure <name>.zip is there, downloading it for a URL datasource.
+
+    Returns None when it is, else no_zip_file, no_data_file, or future_only
+    when check_source_dates kept the current feed.
+    """
+    zip_path = os.path.join(gtfs_dir, data["file"] + ".zip")
+    if data["extract_from"] != "url":
+        if not os.path.exists(zip_path):
+            _LOGGER.error("The given GTFS zipfile was not found")
+            return "no_zip_file"
+        return None
+    if update or not os.path.exists(zip_path):
+        url, headers = _feed_request(data)
+        try:
+            downloaded = _download_feed(gtfs_dir, data["file"], url, headers, check_source_dates)
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.error("The given URL or GTFS data file/folder was not found: %s", ex)
+            return "no_data_file"
+        if not downloaded:
+            _LOGGER.info('New file contains only dates in the future, extracting terminated')
+            return "future_only"
+    return None
 
 
 def _download_feed(gtfs_dir, name, url, headers, check_source_dates=False):
@@ -661,8 +723,13 @@ def _missing_core_tables(db_path):
         conn.close()
 
 
-def _start_extraction(gtfs_dir, name, ignore_files, attempt):
+def _start_extraction(gtfs_dir, name, ignore_files, attempt, routes=None):
     """Extract <name>.zip in a child process, unless one is already at it.
+
+    Returns whether it started one. When routes are given, they become the
+    routes requested for the datasource ([] for the full feed), only once the
+    extraction is sure to start, so that a running one never reads a request
+    half-way and a refused one changes nothing.
 
     The child inherits the lock on <name>.extracting and holds it until it
     exits, however it exits, which is how a killed one is told from a running
@@ -676,13 +743,16 @@ def _start_extraction(gtfs_dir, name, ignore_files, attempt):
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                return
+                return False
             _remove_files(_datasource_file(gtfs_dir, name, FAILED_SUFFIX))
+            if routes is not None:
+                write_filter(gtfs_dir, name, routes)
             extract = multiprocessing.get_context("fork").Process(
                 target=_run_extraction, args=(gtfs_dir, name, ignore_files, attempt), daemon=True)
             extract.start()
             os.ftruncate(fd, 0)
             os.write(fd, json.dumps({"pid": extract.pid, "attempt": attempt}).encode())
+            return True
         except BaseException:
             _remove_files(lock_path)
             raise
@@ -699,14 +769,19 @@ def _run_extraction(gtfs_dir, name, ignore_files, attempt):
     """
     staging = _datasource_file(gtfs_dir, name, STAGING_SUFFIX)
     live = _datasource_file(gtfs_dir, name, ".sqlite")
+    filtered = _datasource_file(gtfs_dir, name, FILTERED_FEED_SUFFIX)
     try:
         _remove_staging(gtfs_dir, name)
+        shutil.rmtree(filtered, ignore_errors=True)
         source = _datasource_file(gtfs_dir, name, ".zip")
         with zipfile.ZipFile(source) as archive:
             members = {posixpath.basename(member) for member in archive.namelist()}
         # pygtfs 0.1.11 fails on this one with a NameError instead of saying so
         if not members & {table + ".txt" for table in CALENDAR_TABLES}:
             raise ValueError("the feed has neither calendar.txt nor calendar_dates.txt")
+        routes = read_filter(gtfs_dir, name)
+        if routes:
+            source = write_filtered_feed(source, routes, filtered, ignore_files)
         schedule = pygtfs.Schedule(staging)
         try:
             pygtfs.append_feed(schedule, source, ignore_files=ignore_files)
@@ -714,19 +789,33 @@ def _run_extraction(gtfs_dir, name, ignore_files, attempt):
         finally:
             schedule.session.close()
             schedule.engine.dispose()
+        dropped = []
+        if routes:
+            # a route the feed has no trips for (any more) is left out, and
+            # said so, rather than holding back the routes that are fine
+            dropped = missing_route_data(staging, routes)
+            if len(dropped) == len(routes):
+                raise ValueError(f"the feed has no trips with stop times for any retained route: {', '.join(dropped)}")
+            remove_routes(staging, dropped)
         missing = _missing_core_tables(staging)
         if missing:
             raise ValueError(f"the feed has no data for: {', '.join(missing)}")
+        if routes:
+            # cheap on a database cut down to a few routes, not on a full one
+            check_integrity(staging)
+            record_retained_routes(staging, sorted(set(routes) - set(dropped)))
         # a journal left by an interrupted write to the old database would be
         # rolled back onto the new one
         _remove_files(live + "-journal")
         os.replace(staging, live)
+        write_missing_routes(gtfs_dir, name, dropped)
         _remove_files(_datasource_file(gtfs_dir, name, FAILED_SUFFIX))
     except BaseException as ex:
         _remove_staging(gtfs_dir, name)
         _write_failure(gtfs_dir, name, f"{type(ex).__name__}: {ex}", attempt)
         raise
     finally:
+        shutil.rmtree(filtered, ignore_errors=True)
         _remove_files(_datasource_file(gtfs_dir, name, LOCK_SUFFIX))
 
 
@@ -786,7 +875,9 @@ def _remove_leftovers(gtfs_dir, name):
     """
     if name not in _DOWNLOADS:
         _remove_files(_datasource_file(gtfs_dir, name, DOWNLOAD_SUFFIX))
-    _remove_files(_datasource_file(gtfs_dir, name, FAILED_SUFFIX + ".tmp"))
+    _remove_files(_datasource_file(gtfs_dir, name, FAILED_SUFFIX + ".tmp"),
+                  _datasource_file(gtfs_dir, name, MISSING_ROUTES_SUFFIX + ".tmp"))
+    shutil.rmtree(_datasource_file(gtfs_dir, name, FILTERED_FEED_SUFFIX), ignore_errors=True)
     temp, temp_out = (_datasource_file(gtfs_dir, name, suffix) for suffix in LEGACY_TEMP_SUFFIXES)
     _restore_or_remove(temp, _datasource_file(gtfs_dir, name, ".zip"))
     _remove_files(temp_out)
@@ -828,6 +919,36 @@ def _sync_extraction_issue(hass, name, state, failure):
     else:
         return
     # called from executor threads as well as from the event loop
+    hass.loop.call_soon_threadsafe(call)
+
+
+def _sync_missing_routes_issue(hass, gtfs_dir, name):
+    """Warn, as a repair issue, about requested routes the live database was
+    built without, and clear the warning once there are none.
+
+    Like _sync_extraction_issue, Home Assistant is only asked when something
+    changed, and the record on disk raises the issue again after a restart.
+    """
+    issue_id = f"routes_missing_{name}"
+    missing = read_missing_routes(gtfs_dir, name)
+    if missing:
+        if _RAISED_MISSING_ROUTES.get(name) == missing:
+            return
+        _RAISED_MISSING_ROUTES[name] = missing
+        _LOGGER.warning("Datasource %s was built without the routes its feed has no trips for: %s",
+                        name, ", ".join(missing))
+        call = functools.partial(
+            ir.async_create_issue, hass, DOMAIN, issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="routes_missing",
+            translation_placeholders={"datasource": name, "routes": ", ".join(missing)},
+            learn_more_url=DOCU_EXTRACTING,
+        )
+    elif _RAISED_MISSING_ROUTES.pop(name, None) is not None:
+        call = functools.partial(ir.async_delete_issue, hass, DOMAIN, issue_id)
+    else:
+        return
     hass.loop.call_soon_threadsafe(call)
 
 
@@ -888,10 +1009,15 @@ def get_route_list(schedule, data):
         row = row_cursor._asdict()
         routes_list.append(list(row_cursor))
     for x in routes_list:
-        val = str(x[0]) + "##" + str(x[1]) + ": (" + str(x[2]) + " - " + str(x[3]) + ") " + str(x[4])
-        routes.append(val)
+        routes.append(f"{x[0]}##{route_label(x[1], x[2], x[3], x[4])}")
     _LOGGER.debug(f"routes: {routes}")
     return routes
+
+
+def parse_route_option(option):
+    """(route_type, route_id) of an entry of get_route_list."""
+    route_type, label = option.split("##", 1)
+    return route_type, route_id_of(label)
 
 # The trips of one direction ride a handful of distinct stop patterns, a
 # few thousand times each over the feed's calendar (TAO tram A: 4214 trips,
@@ -1668,21 +1794,134 @@ def get_agency_list(schedule, data):
     _LOGGER.debug(f"agencies: {agencies}")
     return agencies
 
-async def get_datasources(hass, path) -> dict[str]:
+async def get_datasources(hass, path, include_unbuilt=False) -> dict[str]:
+    """{name: label} of the datasources; include_unbuilt adds those that only
+    have their feed zip so far, e.g. a filtered setup left at its routes."""
     _LOGGER.debug(f"Getting datasources for path: {path}")
     gtfs_dir = hass.config.path(path)
     os.makedirs(gtfs_dir, exist_ok=True)
-    files = await hass.async_add_executor_job(
-            os.listdir, gtfs_dir)
-    datasources = []
-    for file in files:
+    datasources = await hass.async_add_executor_job(_datasource_labels, gtfs_dir, include_unbuilt)
+    _LOGGER.debug(f"Datasources in folder: {datasources}")
+    return datasources
+
+
+def retained_route_choices(hass, path, name):
+    """(options, selected) to choose the routes datasource name retains.
+
+    options are every route of its feed as (route_id, label); selected are the
+    routes requested, else the ones its database holds. None when the feed
+    zip is not there to choose from.
+    """
+    gtfs_dir = hass.config.path(path)
+    source = _datasource_file(gtfs_dir, name, ".zip")
+    if not os.path.exists(source):
+        return None
+    try:
+        requested = read_filter(gtfs_dir, name)
+    except (ValueError, KeyError, TypeError) as ex:
+        # choosing the routes again writes a new request over it
+        _LOGGER.warning("Cannot read the routes requested for datasource %s: %s", name, ex)
+        requested = None
+    return feed_routes(source), requested or _live_retained_routes(gtfs_dir, name) or []
+
+
+def route_left_out(hass, path, name, route_id):
+    """The routes datasource name retains, when route_id is a route of its
+    feed the filter left out; None when it is not filtered or has no such route."""
+    gtfs_dir = hass.config.path(path)
+    retained = _live_retained_routes(gtfs_dir, name)
+    source = _datasource_file(gtfs_dir, name, ".zip")
+    if not retained or route_id in retained or not os.path.exists(source):
+        return None
+    try:
+        in_feed = any(feed_route == route_id for feed_route, _ in feed_routes(source))
+    except Exception as ex:  # pylint: disable=broad-except
+        _LOGGER.warning("Cannot read the routes of datasource %s: %s", name, ex)
+        return None
+    return retained if in_feed else None
+
+
+def _live_retained_routes(gtfs_dir, name):
+    """The routes the live database of datasource name holds; None when it
+    holds the full feed, or cannot be read."""
+    try:
+        return retained_routes(_datasource_file(gtfs_dir, name, ".sqlite"))
+    except sqlite3.Error as ex:
+        _LOGGER.warning("Cannot read the retained routes of datasource %s: %s", name, ex)
+        return None
+
+
+def _built_routes(gtfs_dir, name):
+    """The routes the live database of datasource name was built with, [] for
+    the full feed; None when there is no complete live database."""
+    live = _datasource_file(gtfs_dir, name, ".sqlite")
+    try:
+        if _missing_core_tables(live):
+            return None
+        return retained_routes(live) or []
+    except sqlite3.Error:
+        return None
+
+
+def rebuild_with_routes(hass, path, name, routes, only_if_changed=False):
+    """Rebuild datasource name from its zip, with only routes, or the full
+    feed when there are none.
+
+    Returns started, or why not: extracting when an extraction is already at
+    it, which leaves everything as it was; no_zip_file; or, with
+    only_if_changed, unchanged when the live database, last built without
+    failing, already holds exactly these routes. The database in use stays
+    live until the new one is complete.
+    """
+    gtfs_dir = hass.config.path(path)
+    if not os.path.exists(_datasource_file(gtfs_dir, name, ".zip")):
+        return "no_zip_file"
+    state, failure = _extraction_state(gtfs_dir, name)
+    _sync_extraction_issue(hass, name, state, failure)
+    if state == "running":
+        return "extracting"
+    routes = sorted(set(routes))
+    if only_if_changed and state == "idle" and _built_routes(gtfs_dir, name) == routes:
+        # nothing to build, though the request may still name routes the feed
+        # had no trips for: it now asks for what the database holds
+        write_filter(gtfs_dir, name, routes)
+        write_missing_routes(gtfs_dir, name, [])
+        _sync_missing_routes_issue(hass, gtfs_dir, name)
+        return "unchanged"
+    if not _start_extraction(gtfs_dir, name, IGNORED_FEED_FILES, attempt=1, routes=routes):
+        return "extracting"
+    return "started"
+
+
+# how many retained routes a datasource's label names
+LABEL_ROUTES = 5
+
+
+def _datasource_labels(gtfs_dir, include_unbuilt=False):
+    """{name: label} of the datasources in gtfs_dir; a filtered one's label
+    says so and names the routes its database holds."""
+    names = []
+    unbuilt = set()
+    for file in os.listdir(gtfs_dir):
         # a datasource whose extraction failed has no database, yet still
         # has to be offered for removal
         if file.endswith(".sqlite") or file.endswith(FAILED_SUFFIX):
-            if file.split(".")[0] not in datasources:
-                datasources.append(file.split(".")[0])
-    _LOGGER.debug(f"Datasources in folder: {datasources}")
-    return datasources
+            if file.split(".")[0] not in names:
+                names.append(file.split(".")[0])
+        elif (include_unbuilt and file.endswith(".zip")
+              and not file.endswith(LEGACY_TEMP_SUFFIXES)):
+            unbuilt.add(file.split(".")[0])
+    labels = {}
+    for name in names:
+        routes = _live_retained_routes(gtfs_dir, name)
+        if routes:
+            shown = ", ".join(routes[:LABEL_ROUTES]) + (", ..." if len(routes) > LABEL_ROUTES else "")
+            labels[name] = f"{name} (filtered: {len(routes)} route{'s' if len(routes) > 1 else ''} - {shown})"
+        else:
+            labels[name] = name
+    for name in sorted(unbuilt - set(names)):
+        labels[name] = f"{name} (not built)"
+    return labels
 
 def remove_datasource(hass, path, filename, include_sqlite):
     gtfs_dir = hass.config.path(path)
@@ -1697,9 +1936,12 @@ def remove_datasource(hass, path, filename, include_sqlite):
                 FAILED_SUFFIX, FAILED_SUFFIX + ".tmp", DOWNLOAD_SUFFIX,
                 LEGACY_CURRENT_SUFFIX, *LEGACY_TEMP_SUFFIXES]
     if include_sqlite:
-        suffixes.append(".sqlite")
+        suffixes += [".sqlite", FILTER_SUFFIX, FILTER_SUFFIX + ".tmp",
+                     MISSING_ROUTES_SUFFIX, MISSING_ROUTES_SUFFIX + ".tmp"]
     _remove_files(*(_datasource_file(gtfs_dir, filename, suffix) for suffix in suffixes))
+    shutil.rmtree(_datasource_file(gtfs_dir, filename, FILTERED_FEED_SUFFIX), ignore_errors=True)
     _sync_extraction_issue(hass, filename, "idle", None)
+    _sync_missing_routes_issue(hass, gtfs_dir, filename)
     return "removed"
 
 def check_extracting(hass, gtfs_dir,file):
@@ -1710,6 +1952,7 @@ def check_extracting(hass, gtfs_dir,file):
     if state == "running":
         _LOGGER.debug("Extracting: yes")
         return True
+    _sync_missing_routes_issue(hass, gtfs_dir, file)
     return False
 
 

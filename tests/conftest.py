@@ -20,10 +20,46 @@ other or land in the wrong folder.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+import ha_stub
 
 TESTS_DIR = Path(__file__).parent
+
+
+# Fixtures of the tests that extract a feed into a datasource database
+# (test_extraction, test_feed_filter): a Home Assistant whose config folder is
+# tmp_path, the gtfs2 folder in it, and the repair issues registry as a Mock.
+
+@pytest.fixture
+def hass(tmp_path):
+    return SimpleNamespace(
+        config=SimpleNamespace(path=lambda *parts: os.path.join(str(tmp_path), *parts)),
+        loop=SimpleNamespace(call_soon_threadsafe=lambda callback, *args: callback(*args)),
+    )
+
+
+@pytest.fixture
+def gtfs_dir(tmp_path):
+    path = tmp_path / "gtfs2"
+    path.mkdir()
+    return path
+
+
+@pytest.fixture
+def ir(monkeypatch):
+    gtfs_helper = ha_stub.load("gtfs_helper")
+    mock = Mock()
+    monkeypatch.setattr(gtfs_helper, "ir", mock)
+    monkeypatch.setattr(gtfs_helper, "_RAISED_ISSUES", {})
+    monkeypatch.setattr(gtfs_helper, "_RAISED_MISSING_ROUTES", {})
+    return mock
 
 # test_static_cases.py -> case_route, test_route_combined.py -> case_route_combined
 _TEST_FILE_TO_CASE_FOLDER = {
